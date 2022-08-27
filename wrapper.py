@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from os.path import exists
 
 import numpy as np
@@ -206,13 +207,15 @@ class FedotWrapper:
             return
         for sheet in sheet_list:
             try:
-                df = pd.read_excel(file_path, sheet_name=sheet, index_col=[0]).fillna(0)
+                df_orig = pd.read_excel(file_path, sheet_name=sheet, index_col=[0])
+                df = deepcopy(df_orig).fillna(0)
                 exog_series = self.is_exogenous_df(df)
                 if exog_series.empty:
                     pass
                     res_df = self.make_meta_forecast(df, file)
                 else:
                     res_df = self.make_exog_forecast(df, file, exog_series)
+                res_df[df_orig.isna()] = np.nan
                 df_list.append((res_df, sheet))
 
             except ValueError as e:
