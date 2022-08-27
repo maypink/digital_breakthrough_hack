@@ -13,6 +13,8 @@ from fedot.core.repository.dataset_types import DataTypesEnum
 from fedot.core.repository.tasks import TaskTypesEnum, Task, TsForecastingParams
 from typing import List, Union, Tuple, Dict
 
+from matplotlib import pyplot as plt
+
 ROOT_PATH_DATA = os.path.join(os.getcwd(), 'data')
 
 
@@ -58,7 +60,11 @@ class FedotWrapper:
             file_path = os.path.join(root_data_path, file)
             if 'Test' not in file_path:
                 continue
-            df = pd.read_excel(file_path, sheet_name='Monthly')
+            try:
+                df = pd.read_excel(file_path, sheet_name='Monthly')
+            except ValueError:
+                print('Current excel file does not have data per month')
+                continue
             result_df = pd.DataFrame()
             for column in df.columns:
                 if 'Unnamed' in column:
@@ -109,6 +115,10 @@ class FedotWrapper:
 
                 result = self._complete_column_with_preds(df[column], forecast)
                 result_df[column] = result
+
+                self._visualize_preds(time_series=df[column].values, forecast=forecast,
+                                      horizon=horizon, test_number=test_number, column=column)
+
             self._save_result(test_number=test_number, result_df=result_df)
 
     def _complete_column_with_preds(self, start_data: pd.Series, forecast: np.ndarray):
@@ -148,6 +158,18 @@ class FedotWrapper:
 
         print(f'Results were saved to: {path_to_file}')
         result_df.to_excel(path_to_file)
+
+    @staticmethod
+    def _visualize_preds(time_series: np.ndarray, forecast: np.ndarray, horizon: int,
+                         test_number: int, column: str):
+        plt.plot(time_series)
+        plt.plot(np.arange(len(time_series) - horizon, len(time_series)), forecast)
+        plt.grid()
+        path_to_save = os.path.join(os.getcwd(), 'visualizations')
+        if not exists(path_to_save):
+            os.makedirs(path_to_save)
+        plt.savefig(os.path.join(path_to_save, f'{test_number}_{column}.png'))
+        plt.clf()
 
 
 if __name__ == '__main__':
