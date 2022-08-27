@@ -1,5 +1,4 @@
-import datetime
-from datetime import timedelta
+import json
 from os.path import exists
 
 import numpy as np
@@ -12,9 +11,14 @@ from fedot.core.pipelines.pipeline import Pipeline
 from fedot.core.data.data import InputData
 from fedot.core.repository.dataset_types import DataTypesEnum
 from fedot.core.repository.tasks import TaskTypesEnum, Task, TsForecastingParams
-from typing import List, Union, Tuple, Dict
+from fedot.core.data.data_split import train_test_data_setup
+from examples.advanced.time_series_forecasting.nemo_multiple import mean_absolute_percentage_error as mape
+from typing import Union, Tuple, Dict
+
 
 from matplotlib import pyplot as plt
+
+from metric import wmsfe
 
 ROOT_PATH_DATA = os.path.join(os.getcwd(), 'data')
 
@@ -45,6 +49,12 @@ class FedotWrapper:
         for column in range(1, self.train_ts.shape[1]):
             train_vector = self.get_quantiles_vector_for_ts(self.train_ts.iloc[:, column].values[1:])
             distances.append(distance.cosine(cur_vector, train_vector))
+
+        # for testing on train to delete column from general sample
+        for i in range(len(distances)):
+            if distances[i] == 0:
+                distances[i] = 1
+
         index_min_cosine_dist = distances.index(min(distances))
         nearest_ts_quantile_name = self.train_ts.columns[index_min_cosine_dist]
         return nearest_ts_quantile_name
@@ -71,6 +81,12 @@ class FedotWrapper:
         # calculate correlation
         corr = ts.corr()
         cor_coefs = list(corr.iloc[-1].values)[:-1]
+
+        # for testing on train to delete column from general sample
+        for i in range(len(cor_coefs)):
+            if cor_coefs[i] == 1:
+                cor_coefs[i] = -1
+
         ts_index_with_max_corr = cor_coefs.index(max(cor_coefs))
         ts_name_with_max_corr = ts.columns[ts_index_with_max_corr]
         ts_column_with_max_corr = ts.iloc[:, ts_index_with_max_corr]
@@ -88,6 +104,76 @@ class FedotWrapper:
                 value_column = value_column['Forecast']
             forecast_count[column] = value_column
         return forecast_count
+
+    def predict_train(self):
+        all_features = []
+        all_target = []
+        all_forecast = []
+        df = self.train_ts.fillna(0)
+        df = df.drop([0])
+
+        metrics = {}
+        metrics['mape'] = {}
+        metrics['wmsfe'] = {}
+
+        for column in df.columns:
+            if 'Unnamed' in column:
+                continue
+
+            if self.approach == 'quantile':
+                column_name = self.get_nearest_ts_quantile_name(ts=df[column].values)
+            elif self.approach == 'correlation':
+                column_name, _ = \
+                    self.get_ts_name_with_most_correlation(time_series=df[column].values)
+            else:
+                raise NotImplementedError()
+
+            pipeline = self._get_pipeline(column_name=column_name)
+
+            horizon = 12
+
+            task = Task(TaskTypesEnum.ts_forecasting,
+                        TsForecastingParams(forecast_length=horizon))
+
+            time_series = df[column].values
+
+            train_input = InputData(idx=np.arange(len(time_series)),
+                                    features=time_series,
+                                    target=time_series,
+                                    task=task,
+                                    data_type=DataTypesEnum.ts)
+
+            train_data, test_data = train_test_data_setup(train_input)
+
+            pipeline.fit(input_data=train_data)
+            iter_num = 10
+            pipeline.fine_tune_all_nodes(
+                loss_function=MAE.metric,
+                input_data=train_data,
+                timeout=1,
+                iterations=iter_num)
+
+            forecast = np.ravel(pipeline.predict(test_data).predict)
+
+            target = np.ravel(test_data.target)
+
+            self._visualize_preds(time_series=df[column].values, forecast=forecast,
+                                  horizon=horizon, test_number=-1, column=column)
+            all_features.append(test_data.features)
+            all_target.append(target)
+            all_forecast.append(forecast)
+            mape_score = mape(target, forecast)
+            metrics['mape'][column] = mape_score
+            metrics['wmsfe'][column] = wmsfe(target.reshape(-1, 1),
+                                             forecast.reshape(-1, 1),
+                                             test_data.features.reshape(-1, 1))
+            print(mape_score)
+
+        metrics['wmsfe']['total'] = wmsfe(np.array(all_target).transpose(),
+                                 np.array(all_forecast).transpose(),
+                                 np.array(all_features).transpose())
+        with open(f'metrics_{self.approach}_with_tune_{iter_num}.json', 'w') as fp:
+            json.dump(metrics, fp)
 
     def predict(self, root_data_path: str):
         for file in os.listdir(root_data_path):
@@ -143,9 +229,11 @@ class FedotWrapper:
                 df.fillna(0)
 
                 pipeline.fit(input_data=train_data)
+                iter_num = 10
                 pipeline.fine_tune_all_nodes(
                     loss_function=MAE.metric,
-                    input_data=train_data,    # TODO: check if there will be overfitting
+                    input_data=train_data,
+                    iterations=iter_num,
                     timeout=1)
 
                 forecast = np.ravel(pipeline.predict(test_data).predict)
@@ -188,6 +276,10 @@ class FedotWrapper:
         result_file_name = f'Test_output_{test_number}.xlsx'
 
         result_path = os.path.join(ROOT_PATH_DATA, 'results', self.approach)
+        if test_number == -1:
+            result_path = os.path.join(result_path, 'train')
+        else:
+            result_path = os.path.join(result_path, 'test')
         if not exists(result_path):
             os.makedirs(result_path)
 
@@ -201,10 +293,14 @@ class FedotWrapper:
         plt.plot(time_series)
         plt.plot(np.arange(len(time_series) - horizon, len(time_series)), forecast)
         plt.grid()
-        path_to_save = os.path.join(os.getcwd(), 'visualizations', self.approach)
+        path_to_save = os.path.join(os.getcwd(), 'visualizations', f'{self.approach}')
+        if test_number == -1:
+            path_to_save = os.path.join(path_to_save, 'train')
+        else:
+            path_to_save = os.path.join(path_to_save, 'test')
         if not exists(path_to_save):
             os.makedirs(path_to_save)
-        plt.savefig(os.path.join(path_to_save, f'{test_number}_{column}.png'))
+        plt.savefig(os.path.join(path_to_save, f"{test_number}_{column.replace('/', '')[:-1]}.png"))
         plt.clf()
 
 
