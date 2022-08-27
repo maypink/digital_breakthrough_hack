@@ -4,6 +4,10 @@ from os.path import exists
 import numpy as np
 import pandas as pd
 import os
+
+from fedot.core.data.data_split import train_test_data_setup
+from fedot.core.data.multi_modal import MultiModalData
+from fedot.core.pipelines.pipeline_builder import PipelineBuilder
 from scipy.spatial import distance
 
 from fedot.core.composer.metrics import MAE
@@ -40,6 +44,22 @@ class FedotWrapper:
                 quantile = np.quantile(part, q)
                 quantiles_vector.append(quantile)
         return np.array(quantiles_vector)
+
+    @staticmethod
+    def _get_horizons_to_predict(df: Union[pd.DataFrame, pd.Series]):
+        """ How far ahead to predict """
+        forecast_count = {}
+        for column in df.columns:
+            if type(column) == str and "Unnamed" in column:
+                continue
+            value_column = df[column].value_counts()
+            if "Forecast" not in value_column:
+                value_column = 0
+            else:
+                value_column = value_column['Forecast']
+            forecast_count[column] = value_column
+
+        return forecast_count
 
     def get_nearest_ts_quantile_name(self, ts: np.ndarray):
         """ Get name of column which consist train ts nearest to current by cosine dist """
@@ -185,9 +205,16 @@ class FedotWrapper:
             for sheet in sheet_list:
                 try:
                     df = pd.read_excel(file_path, sheet_name=sheet).fillna(0)
+                    exog_series = self.is_exogenous_df(df)
+                    if exog_series.empty:
+                        self.make_meta_forecast(df, file)
+                    else:
+                        self.make_exog_forecast(df, file, exog_series)
                 except ValueError:
                     print(f'Current excel file does not have data per {sheet}')
                     continue
+
+            def make_meta_forecast(self, df, file):
                 result_df = pd.DataFrame()
                 for column in df.columns:
                     if 'Unnamed' in column:
@@ -229,13 +256,13 @@ class FedotWrapper:
                                           task=task,
                                           data_type=DataTypesEnum.ts)
 
+                    df.fillna(0)
+
                     pipeline.fit(input_data=train_data)
-                    iter_num = 10
                     pipeline.fine_tune_all_nodes(
                         loss_function=MAE.metric,
-                        input_data=train_data,
-                        iterations=iter_num,
-                        timeout=1)
+                        input_data=train_data,  # TODO: check if there will be overfitting
+                        iterations=50)
 
                     forecast = np.ravel(pipeline.predict(test_data).predict)
 
@@ -244,8 +271,87 @@ class FedotWrapper:
 
                     self._visualize_preds(time_series=df[column].values, forecast=forecast,
                                           horizon=horizon, test_number=test_number, column=column)
-                df_list.append((df, sheet))
-            self._save_result(test_number=test_number, df_list=df_list)
+
+                self._save_result(test_number=test_number, result_df=result_df)
+
+    def make_exog_forecast(self, df, file, df_exog):
+        result_df = pd.DataFrame()
+        for column in df.columns:
+            if 'Unnamed' in column:
+                continue
+
+            test_number = self._get_test_number(file_name=file)
+
+            if self.approach == 'quantile':
+                column_name = self.get_nearest_ts_quantile_name(ts=df[column].values)
+            elif self.approach == 'correlation':
+                column_name, _ = \
+                    self.get_ts_name_with_most_correlation(time_series=df[column].values)
+
+            horizon = self._get_horizons_to_predict(pd.DataFrame(df[column].values))[0]
+
+            # relative time series
+            if horizon == 0:
+                result_df[column] = df[column].values
+                continue
+
+            task = Task(TaskTypesEnum.ts_forecasting,
+                        TsForecastingParams(forecast_length=horizon))
+
+            time_series = df[column].values
+
+            train_ts = time_series[:-horizon]
+
+            train_data = InputData(idx=np.arange(len(train_ts)),
+                                   features=train_ts,
+                                   target=train_ts,
+                                   task=task,
+                                   data_type=DataTypesEnum.ts)
+
+            test_data = InputData(idx=np.arange(len(train_ts)),
+                                  features=train_ts,
+                                  target=None,
+                                  task=task,
+                                  data_type=DataTypesEnum.ts)
+
+            train_dataset = MultiModalData({'data_source_ts/1': train_data,
+                                            **{f'exog_ts':
+
+                                                   train_test_data_setup(InputData(
+                                                       idx=np.arange(len(df_exog.iloc[:, m])),
+                                                       features=df_exog.iloc[:, m].values,
+                                                       target=df[column].replace('Forecast', 0),
+                                                       task=task, data_type=DataTypesEnum.ts))[0]
+
+                                               for m in
+                                               range(len(df_exog.columns))}})
+            test_dataset = MultiModalData({
+                'data_source_ts/1': test_data,
+                **{f'exog_ts':
+
+                       train_test_data_setup(InputData(idx=np.arange(len(df_exog.iloc[:, m])),
+                                                       features=df_exog.iloc[:, m].values,
+                                                       target=df[column].replace('Forecast', 0),
+                                                       task=task, data_type=DataTypesEnum.ts))[1]
+
+                   for m in
+                   range(len(df_exog.columns))}})
+
+            pipeline = self.return_exog_pipeline(df_exog, task)
+
+            df.fillna(0)
+            # pipeline.show()
+            pipeline.fit_from_scratch(train_dataset)
+
+            # Predict
+            forecast = np.ravel(pipeline.predict(test_dataset).predict)
+            result = self._complete_column_with_preds(df[column], forecast)
+            result_df[column] = result
+
+            self._visualize_preds(time_series=df[column].values, forecast=forecast,
+                                  horizon=horizon, test_number=test_number, column=column)
+
+        self._save_result(test_number=test_number, result_df=result_df)
 
     def _complete_column_with_preds(self, start_data: pd.Series, forecast: np.ndarray):
         """ Fill start data with predictions """
@@ -257,7 +363,7 @@ class FedotWrapper:
     def _get_test_number(file_name: str) -> int:
         """ Get the number of current test """
         # number = file_name.split('.xlsx')[0].split('Test_input_')[1]
-        number = file_name.split('.xlsx')[0].split('Test_example')[1]    # for local testing
+        number = file_name.split('.xlsx')[0].split('Test_example')[1]  # for local testing
         return int(number)
 
     def _get_pipeline(self, column_name: str) -> Pipeline:
@@ -269,7 +375,7 @@ class FedotWrapper:
                 model_dir = os.path.join(self.path_to_models_params, file)
                 for model_file in os.listdir(model_dir):
                     if model_file.endswith('.json'):
-                        pipeline = Pipeline().from_serialized(source=os.path.join(model_dir, model_file))
+                        pipeline = Pipeline.from_serialized(source=os.path.join(model_dir, model_file))
         return pipeline
 
     def _save_result(self, test_number: int, df_list: list):
@@ -305,6 +411,27 @@ class FedotWrapper:
             os.makedirs(path_to_save)
         plt.savefig(os.path.join(path_to_save, f"{test_number}_{column.replace('/', '')[:-1]}.png"))
         plt.clf()
+
+    def return_exog_pipeline(self, df_exog, task):
+        pipeline = PipelineBuilder()
+        m_i = 0
+        for i in range(len(df_exog.columns)):
+            pipeline = pipeline.add_node(f'exog_ts', branch_idx=i)
+            m_i = i
+        pipeline = pipeline.add_node(f'data_source_ts/1', branch_idx=m_i + 1).add_node('lagged', branch_idx=m_i + 1)
+        pipeline = pipeline.join_branches('ridge').to_pipeline()
+        return pipeline
+
+    def is_exogenous_df(self, df: pd.DataFrame):
+        return self.return_exogenous_df(df)
+
+    def return_exogenous_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        f_c = self._get_horizons_to_predict(df)
+        df_res = pd.DataFrame()
+        for k, v in f_c.items():
+            if v == 0:
+                df_res = pd.concat([df_res, pd.DataFrame({k: df[k]})], axis=1)
+        return df_res
 
 
 if __name__ == '__main__':
