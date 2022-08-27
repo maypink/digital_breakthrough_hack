@@ -178,73 +178,74 @@ class FedotWrapper:
     def predict(self, root_data_path: str):
         for file in os.listdir(root_data_path):
             file_path = os.path.join(root_data_path, file)
+            sheet_list = ['Monthly', 'Quarterly']
+            df_list = []
             if 'Test' not in file_path:
                 continue
-            try:
-                df = pd.read_excel(file_path, sheet_name='Monthly')
-            except ValueError:
-                print('Current excel file does not have data per month')
-                continue
-            result_df = pd.DataFrame()
-            for column in df.columns:
-                if 'Unnamed' in column:
+            for sheet in sheet_list:
+                try:
+                    df = pd.read_excel(file_path, sheet_name=sheet).fillna(0)
+                except ValueError:
+                    print(f'Current excel file does not have data per {sheet}')
                     continue
+                result_df = pd.DataFrame()
+                for column in df.columns:
+                    if 'Unnamed' in column:
+                        continue
 
-                test_number = self._get_test_number(file_name=file)
+                    test_number = self._get_test_number(file_name=file)
 
-                if self.approach == 'quantile':
-                    column_name = self.get_nearest_ts_quantile_name(ts=df[column].values)
-                elif self.approach == 'correlation':
-                    column_name, _ = \
-                        self.get_ts_name_with_most_correlation(time_series=df[column].values)
+                    if self.approach == 'quantile':
+                        column_name = self.get_nearest_ts_quantile_name(ts=df[column].values)
+                    elif self.approach == 'correlation':
+                        column_name, _ = \
+                            self.get_ts_name_with_most_correlation(time_series=df[column].values)
 
-                pipeline = self._get_pipeline(column_name=column_name)
+                    pipeline = self._get_pipeline(column_name=column_name)
 
-                horizon = self._get_horizons_to_predict(pd.DataFrame(df[column].values))[0]
+                    horizon = self._get_horizons_to_predict(pd.DataFrame(df[column].values))[0]
 
-                # relative time series
-                if horizon == 0:
-                    result_df[column] = df[column].values
-                    continue
+                    # relative time series
+                    if horizon == 0:
+                        result_df[column] = df[column].values
+                        continue
 
-                task = Task(TaskTypesEnum.ts_forecasting,
-                            TsForecastingParams(forecast_length=horizon))
+                    task = Task(TaskTypesEnum.ts_forecasting,
+                                TsForecastingParams(forecast_length=horizon))
 
-                time_series = df[column].values
+                    time_series = df[column].values
 
-                train_ts = time_series[:-horizon]
+                    train_ts = time_series[:-horizon]
 
-                train_data = InputData(idx=np.arange(len(train_ts)),
-                                       features=train_ts,
-                                       target=train_ts,
-                                       task=task,
-                                       data_type=DataTypesEnum.ts)
+                    train_data = InputData(idx=np.arange(len(train_ts)),
+                                           features=train_ts,
+                                           target=train_ts,
+                                           task=task,
+                                           data_type=DataTypesEnum.ts)
 
-                test_data = InputData(idx=np.arange(len(train_ts)),
-                                      features=train_ts,
-                                      target=None,
-                                      task=task,
-                                      data_type=DataTypesEnum.ts)
+                    test_data = InputData(idx=np.arange(len(train_ts)),
+                                          features=train_ts,
+                                          target=None,
+                                          task=task,
+                                          data_type=DataTypesEnum.ts)
 
-                df.fillna(0)
+                    pipeline.fit(input_data=train_data)
+                    iter_num = 10
+                    pipeline.fine_tune_all_nodes(
+                        loss_function=MAE.metric,
+                        input_data=train_data,
+                        iterations=iter_num,
+                        timeout=1)
 
-                pipeline.fit(input_data=train_data)
-                iter_num = 10
-                pipeline.fine_tune_all_nodes(
-                    loss_function=MAE.metric,
-                    input_data=train_data,
-                    iterations=iter_num,
-                    timeout=1)
+                    forecast = np.ravel(pipeline.predict(test_data).predict)
 
-                forecast = np.ravel(pipeline.predict(test_data).predict)
+                    result = self._complete_column_with_preds(df[column], forecast)
+                    result_df[column] = result
 
-                result = self._complete_column_with_preds(df[column], forecast)
-                result_df[column] = result
-
-                self._visualize_preds(time_series=df[column].values, forecast=forecast,
-                                      horizon=horizon, test_number=test_number, column=column)
-
-            self._save_result(test_number=test_number, result_df=result_df)
+                    self._visualize_preds(time_series=df[column].values, forecast=forecast,
+                                          horizon=horizon, test_number=test_number, column=column)
+                df_list.append((df, sheet))
+            self._save_result(test_number=test_number, df_list=df_list)
 
     def _complete_column_with_preds(self, start_data: pd.Series, forecast: np.ndarray):
         """ Fill start data with predictions """
@@ -271,7 +272,7 @@ class FedotWrapper:
                         pipeline = Pipeline().from_serialized(source=os.path.join(model_dir, model_file))
         return pipeline
 
-    def _save_result(self, test_number: int, result_df: pd.DataFrame):
+    def _save_result(self, test_number: int, df_list: list):
         """ Saves full ts with preds in xlsx """
         result_file_name = f'Test_output_{test_number}.xlsx'
 
@@ -286,7 +287,9 @@ class FedotWrapper:
         path_to_file = os.path.join(result_path, result_file_name)
 
         print(f'Results were saved to: {path_to_file}')
-        result_df.to_excel(path_to_file)
+        with pd.ExcelWriter(path_to_file) as writer:
+            for df in df_list:
+                df[0].to_excel(writer, sheet_name=df[1])
 
     def _visualize_preds(self, time_series: np.ndarray, forecast: np.ndarray, horizon: int,
                          test_number: int, column: str):
