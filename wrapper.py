@@ -5,9 +5,9 @@ import numpy as np
 import pandas as pd
 import os
 
-from fedot.core.data.data_split import train_test_data_setup
 from fedot.core.data.multi_modal import MultiModalData
 from fedot.core.pipelines.pipeline_builder import PipelineBuilder
+from joblib import Parallel, delayed
 from scipy.spatial import distance
 
 from fedot.core.composer.metrics import MAE
@@ -18,7 +18,6 @@ from fedot.core.repository.tasks import TaskTypesEnum, Task, TsForecastingParams
 from fedot.core.data.data_split import train_test_data_setup
 from examples.advanced.time_series_forecasting.nemo_multiple import mean_absolute_percentage_error as mape
 from typing import Union, Tuple, Dict
-
 
 from matplotlib import pyplot as plt
 
@@ -187,94 +186,101 @@ class FedotWrapper:
             metrics['wmsfe'][column] = wmsfe(target.reshape(-1, 1),
                                              forecast.reshape(-1, 1),
                                              test_data.features.reshape(-1, 1))
-            print(mape_score)
 
         metrics['wmsfe']['total'] = wmsfe(np.array(all_target).transpose(),
-                                 np.array(all_forecast).transpose(),
-                                 np.array(all_features).transpose())
+                                          np.array(all_forecast).transpose(),
+                                          np.array(all_features).transpose())
         with open(f'metrics_{self.approach}_with_tune_{iter_num}.json', 'w') as fp:
             json.dump(metrics, fp)
 
     def predict(self, root_data_path: str):
-        for file in os.listdir(root_data_path):
-            file_path = os.path.join(root_data_path, file)
-            sheet_list = ['Monthly', 'Quarterly']
-            df_list = []
-            if 'Test' not in file_path:
+        pool = Parallel(n_jobs=4)
+        pool([delayed(self.eval_file)(root_data_path, file)
+              for file in os.listdir(root_data_path)])
+
+    def eval_file(self, root_data_path, file):
+        file_path = os.path.join(root_data_path, file)
+        sheet_list = ['Monthly', 'Quarterly']
+        df_list = []
+        if 'Test' not in file_path:
+            return
+        for sheet in sheet_list:
+            try:
+                df = pd.read_excel(file_path, sheet_name=sheet, index_col=[0]).fillna(0)
+                exog_series = self.is_exogenous_df(df)
+                if exog_series.empty:
+                    pass
+                    res_df = self.make_meta_forecast(df, file)
+                else:
+                    res_df = self.make_exog_forecast(df, file, exog_series)
+                df_list.append((res_df, sheet))
+
+            except ValueError as e:
+                print(f'Current excel file does not have data per {sheet}')
                 continue
-            for sheet in sheet_list:
-                try:
-                    df = pd.read_excel(file_path, sheet_name=sheet).fillna(0)
-                    exog_series = self.is_exogenous_df(df)
-                    if exog_series.empty:
-                        self.make_meta_forecast(df, file)
-                    else:
-                        self.make_exog_forecast(df, file, exog_series)
-                except ValueError:
-                    print(f'Current excel file does not have data per {sheet}')
-                    continue
+        self._save_result(test_number=self._get_test_number(file_name=file), df_list=df_list)
 
-            def make_meta_forecast(self, df, file):
-                result_df = pd.DataFrame()
-                for column in df.columns:
-                    if 'Unnamed' in column:
-                        continue
+    def make_meta_forecast(self, df, file):
+        result_df = pd.DataFrame()
+        for column in df.columns:
+            if 'Unnamed' in column:
+                continue
 
-                    test_number = self._get_test_number(file_name=file)
+            test_number = self._get_test_number(file_name=file)
 
-                    if self.approach == 'quantile':
-                        column_name = self.get_nearest_ts_quantile_name(ts=df[column].values)
-                    elif self.approach == 'correlation':
-                        column_name, _ = \
-                            self.get_ts_name_with_most_correlation(time_series=df[column].values)
+            if self.approach == 'quantile':
+                column_name = self.get_nearest_ts_quantile_name(ts=df[column].values)
+            elif self.approach == 'correlation':
+                column_name, _ = \
+                    self.get_ts_name_with_most_correlation(time_series=df[column].values)
 
-                    pipeline = self._get_pipeline(column_name=column_name)
+            pipeline = self._get_pipeline(column_name=column_name)
 
-                    horizon = self._get_horizons_to_predict(pd.DataFrame(df[column].values))[0]
+            horizon = self._get_horizons_to_predict(pd.DataFrame(df[column].values))[0]
 
-                    # relative time series
-                    if horizon == 0:
-                        result_df[column] = df[column].values
-                        continue
+            # relative time series
+            if horizon == 0:
+                result_df[column] = df[column].values
+                continue
 
-                    task = Task(TaskTypesEnum.ts_forecasting,
-                                TsForecastingParams(forecast_length=horizon))
+            task = Task(TaskTypesEnum.ts_forecasting,
+                        TsForecastingParams(forecast_length=horizon))
 
-                    time_series = df[column].values
+            time_series = df[column].values
 
-                    train_ts = time_series[:-horizon]
+            train_ts = time_series[:-horizon]
 
-                    train_data = InputData(idx=np.arange(len(train_ts)),
-                                           features=train_ts,
-                                           target=train_ts,
-                                           task=task,
-                                           data_type=DataTypesEnum.ts)
+            train_data = InputData(idx=np.arange(len(train_ts)),
+                                   features=train_ts,
+                                   target=train_ts,
+                                   task=task,
+                                   data_type=DataTypesEnum.ts)
 
-                    test_data = InputData(idx=np.arange(len(train_ts)),
-                                          features=train_ts,
-                                          target=None,
-                                          task=task,
-                                          data_type=DataTypesEnum.ts)
+            test_data = InputData(idx=np.arange(len(train_ts)),
+                                  features=train_ts,
+                                  target=None,
+                                  task=task,
+                                  data_type=DataTypesEnum.ts)
 
-                    df.fillna(0)
+            df.fillna(0)
 
-                    pipeline.fit(input_data=train_data)
-                    pipeline.fine_tune_all_nodes(
-                        loss_function=MAE.metric,
-                        input_data=train_data,  # TODO: check if there will be overfitting
-                        iterations=50)
+            pipeline.fit(input_data=train_data)
+            pipeline.fine_tune_all_nodes(
+                loss_function=MAE.metric,
+                input_data=train_data,  # TODO: check if there will be overfitting
+                iterations=50)
 
-                    forecast = np.ravel(pipeline.predict(test_data).predict)
+            forecast = np.ravel(pipeline.predict(test_data).predict)
 
-                    result = self._complete_column_with_preds(df[column], forecast)
-                    result_df[column] = result
+            result = self._complete_column_with_preds(df[column], forecast)
+            result_df[column] = result
 
-                    self._visualize_preds(time_series=df[column].values, forecast=forecast,
-                                          horizon=horizon, test_number=test_number, column=column)
-
-                self._save_result(test_number=test_number, result_df=result_df)
+            self._visualize_preds(time_series=df[column].values, forecast=forecast,
+                                  horizon=horizon, test_number=test_number, column=column)
+        return result_df
 
     def make_exog_forecast(self, df, file, df_exog):
+
         result_df = pd.DataFrame()
         for column in df.columns:
             if 'Unnamed' in column:
@@ -351,7 +357,7 @@ class FedotWrapper:
             self._visualize_preds(time_series=df[column].values, forecast=forecast,
                                   horizon=horizon, test_number=test_number, column=column)
 
-        self._save_result(test_number=test_number, result_df=result_df)
+        return result_df
 
     def _complete_column_with_preds(self, start_data: pd.Series, forecast: np.ndarray):
         """ Fill start data with predictions """
@@ -409,7 +415,8 @@ class FedotWrapper:
             path_to_save = os.path.join(path_to_save, 'test')
         if not exists(path_to_save):
             os.makedirs(path_to_save)
-        plt.savefig(os.path.join(path_to_save, f"{test_number}_{column.replace('/', '')[:-1]}.png"))
+
+        plt.savefig(os.path.join(path_to_save, f"{test_number}_{column.replace('/', '')}.png"))
         plt.clf()
 
     def return_exog_pipeline(self, df_exog, task):
@@ -428,7 +435,10 @@ class FedotWrapper:
     def return_exogenous_df(self, df: pd.DataFrame) -> pd.DataFrame:
         f_c = self._get_horizons_to_predict(df)
         df_res = pd.DataFrame()
+
         for k, v in f_c.items():
+            if type(k) == str and 'Unnamed' in k:
+                continue
             if v == 0:
                 df_res = pd.concat([df_res, pd.DataFrame({k: df[k]})], axis=1)
         return df_res
