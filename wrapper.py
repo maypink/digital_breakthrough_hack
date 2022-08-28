@@ -125,8 +125,77 @@ class FedotWrapper:
             forecast_count[column] = value_column
         return forecast_count
 
+    def predict_train(self):
+        all_features = []
+        all_target = []
+        all_forecast = []
+        df = self.train_ts.fillna(0)
+        df = df.drop([0])
+
+        metrics = {}
+        metrics['mape'] = {}
+        metrics['wmsfe'] = {}
+
+        for column in df.columns:
+            if 'Unnamed' in column:
+                continue
+
+            if self.approach == 'quantile':
+                column_name = self.get_nearest_ts_quantile_name(ts=df[column].values)
+            elif self.approach == 'correlation':
+                column_name, _ = \
+                    self.get_ts_name_with_most_correlation(time_series=df[column].values)
+            else:
+                raise NotImplementedError()
+
+            pipeline = self._get_pipeline(column_name=column_name)
+
+            horizon = 12
+
+            task = Task(TaskTypesEnum.ts_forecasting,
+                        TsForecastingParams(forecast_length=horizon))
+
+            time_series = df[column].values
+
+            train_input = InputData(idx=np.arange(len(time_series)),
+                                    features=time_series,
+                                    target=time_series,
+                                    task=task,
+                                    data_type=DataTypesEnum.ts)
+
+            train_data, test_data = train_test_data_setup(train_input)
+
+            pipeline.fit(input_data=train_data)
+            iter_num = 10
+            pipeline.fine_tune_all_nodes(
+                loss_function=MAE.metric,
+                input_data=train_data,
+                timeout=1,
+                iterations=iter_num)
+
+            forecast = np.ravel(pipeline.predict(test_data).predict)
+
+            target = np.ravel(test_data.target)
+
+            self._visualize_preds(time_series=df[column].values, forecast=forecast,
+                                  horizon=horizon, test_number=-1, column=column)
+            all_features.append(test_data.features)
+            all_target.append(target)
+            all_forecast.append(forecast)
+            mape_score = mape(target, forecast)
+            metrics['mape'][column] = mape_score
+            metrics['wmsfe'][column] = wmsfe(target.reshape(-1, 1),
+                                             forecast.reshape(-1, 1),
+                                             test_data.features.reshape(-1, 1))
+
+        metrics['wmsfe']['total'] = wmsfe(np.array(all_target).transpose(),
+                                          np.array(all_forecast).transpose(),
+                                          np.array(all_features).transpose())
+        with open(f'metrics_{self.approach}_with_tune_{iter_num}.json', 'w') as fp:
+            json.dump(metrics, fp)
+
     def predict(self, root_data_path: str):
-        pool = Parallel(n_jobs=1)
+        pool = Parallel(n_jobs=4)
         pool([delayed(self.eval_file)(root_data_path, file)
               for file in os.listdir(root_data_path)])
 
@@ -195,13 +264,12 @@ class FedotWrapper:
                                   task=task,
                                   data_type=DataTypesEnum.ts)
 
-            df.fillna(0)
-
             pipeline.fit(input_data=train_data)
+            iter_num = 10
             pipeline.fine_tune_all_nodes(
                 loss_function=MAE.metric,
                 input_data=train_data,  # TODO: check if there will be overfitting
-                iterations=50)
+                iterations=iter_num)
 
             forecast = np.ravel(pipeline.predict(test_data).predict)
 
@@ -278,7 +346,7 @@ class FedotWrapper:
 
             pipeline = self.return_exog_pipeline(df_exog, task)
 
-            df.fillna(0)
+            # df.fillna(0)
             # pipeline.show()
             pipeline.fit_from_scratch(train_dataset)
 
@@ -352,8 +420,7 @@ class FedotWrapper:
         plt.savefig(os.path.join(path_to_save, f"{test_number}_{column.replace('/', '')}.png"))
         plt.clf()
 
-    @staticmethod
-    def return_exog_pipeline(df_exog, task):
+    def return_exog_pipeline(self, df_exog, task):
         pipeline = PipelineBuilder()
         m_i = 0
         for i in range(len(df_exog.columns)):
@@ -366,8 +433,7 @@ class FedotWrapper:
     def is_exogenous_df(self, df: pd.DataFrame):
         return self.return_exogenous_df(df)
 
-    @staticmethod
-    def return_exogenous_df(df: pd.DataFrame) -> pd.DataFrame:
+    def return_exogenous_df(self, df: pd.DataFrame) -> pd.DataFrame:
         f_c = self._get_horizons_to_predict(df)
         df_res = pd.DataFrame()
 
