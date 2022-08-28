@@ -203,7 +203,7 @@ class FedotWrapper:
         file_path = os.path.join(root_data_path, file)
         sheet_list = ['Monthly', 'Quarterly']
         df_list = []
-        if 'Test' not in file_path:
+        if 'Test' not in file:
             return
         for sheet in sheet_list:
             try:
@@ -223,7 +223,7 @@ class FedotWrapper:
         self._save_result(test_number=self._get_test_number(file_name=file), df_list=df_list)
 
     def make_meta_forecast(self, df, file):
-        result_df = pd.DataFrame()
+        result_df = deepcopy(df)
         for column in df.columns:
             if 'Unnamed' in column:
                 continue
@@ -282,7 +282,7 @@ class FedotWrapper:
 
     def make_exog_forecast(self, df, file, df_exog):
 
-        result_df = pd.DataFrame()
+        result_df = deepcopy(df)
         for column in df.columns:
             if 'Unnamed' in column:
                 continue
@@ -353,7 +353,7 @@ class FedotWrapper:
             # Predict
             forecast = np.ravel(pipeline.predict(test_dataset).predict)
             result = self._complete_column_with_preds(df[column], forecast)
-            result_df[column] = result
+            result_df[column] = result.values
 
             self._visualize_preds(time_series=df[column].values, forecast=forecast,
                                   horizon=horizon, test_number=test_number, column=column)
