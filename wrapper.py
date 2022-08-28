@@ -195,7 +195,7 @@ class FedotWrapper:
             json.dump(metrics, fp)
 
     def predict(self, root_data_path: str):
-        pool = Parallel(n_jobs=4)
+        pool = Parallel(n_jobs=1)
         pool([delayed(self.eval_file)(root_data_path, file)
               for file in os.listdir(root_data_path)])
 
@@ -210,11 +210,11 @@ class FedotWrapper:
                 df_orig = pd.read_excel(file_path, sheet_name=sheet, index_col=[0])
                 df = deepcopy(df_orig).fillna(0)
                 exog_series = self.is_exogenous_df(df)
-                if exog_series.empty:
-                    pass
-                    res_df = self.make_meta_forecast(df, file)
-                else:
-                    res_df = self.make_exog_forecast(df, file, exog_series)
+                res_df = self.make_meta_forecast(df, file)
+                # if exog_series.empty:
+                #     res_df = self.make_meta_forecast(df, file)
+                # else:
+                #     res_df = self.make_exog_forecast(df, file, exog_series)
                 res_df[df_orig.isna()] = np.nan
                 df_list.append((res_df, sheet))
 
@@ -408,9 +408,10 @@ class FedotWrapper:
 
     def _visualize_preds(self, time_series: np.ndarray, forecast: np.ndarray, horizon: int,
                          test_number: int, column: str):
-        plt.plot(time_series)
-        plt.plot(np.arange(len(time_series) - horizon, len(time_series)), forecast)
+        plt.plot(time_series[:-horizon])
+        plt.plot(np.arange(len(time_series) - horizon-1, len(time_series)), [time_series[:-horizon][-1]]+list(forecast))
         plt.grid()
+        plt.title(f"{test_number}_{column.replace('/', '')}")
         path_to_save = os.path.join(os.getcwd(), 'visualizations', f'{self.approach}')
         if test_number == -1:
             path_to_save = os.path.join(path_to_save, 'train')
