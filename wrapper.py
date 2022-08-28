@@ -371,8 +371,8 @@ class FedotWrapper:
     @staticmethod
     def _get_test_number(file_name: str) -> int:
         """ Get the number of current test """
-        # number = file_name.split('.xlsx')[0].split('Test_input_')[1]
-        number = file_name.split('.xlsx')[0].split('Test_example')[1]  # for local testing
+        number = file_name.split('.xlsx')[0].split('Test_input_')[1]
+        # number = file_name.split('.xlsx')[0].split('Test_example')[1]  # for local testing
         return int(number)
 
     def _get_pipeline(self, column_name: str) -> Pipeline:
