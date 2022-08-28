@@ -221,6 +221,8 @@ class FedotWrapper:
                 print(f'Current excel file does not have data per {sheet}')
                 continue
         self._save_result(test_number=self._get_test_number(file_name=file), df_list=df_list)
+        os.remove(file_path)
+        print(f'File {file} finished and deleted')
 
     def make_meta_forecast(self, df, file):
         result_df = deepcopy(df)
