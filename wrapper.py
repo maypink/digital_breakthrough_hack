@@ -170,8 +170,8 @@ class FedotWrapper:
             print(mape_score)
 
         metrics['wmsfe']['total'] = wmsfe(np.array(all_target).transpose(),
-                                 np.array(all_forecast).transpose(),
-                                 np.array(all_features).transpose())
+                                          np.array(all_forecast).transpose(),
+                                          np.array(all_features).transpose())
         with open(f'metrics_{self.approach}_with_tune_{iter_num}.json', 'w') as fp:
             json.dump(metrics, fp)
 
@@ -303,7 +303,7 @@ class FedotWrapper:
             path_to_save = os.path.join(path_to_save, 'test')
         if not exists(path_to_save):
             os.makedirs(path_to_save)
-        plt.savefig(os.path.join(path_to_save, f"{test_number}_{column.replace('/', '')[:-1]}.png"))
+        plt.savefig(os.path.join(path_to_save, f"{test_number}_{column.replace('/', '')}.png"))
         plt.clf()
 
 
