@@ -200,6 +200,7 @@ class FedotWrapper:
               for file in os.listdir(root_data_path)])
 
     def eval_file(self, root_data_path, file):
+        print(file)
         file_path = os.path.join(root_data_path, file)
         sheet_list = ['Monthly', 'Quarterly']
         df_list = []
@@ -220,6 +221,7 @@ class FedotWrapper:
             except ValueError as e:
                 print(f'Current excel file does not have data per {sheet}')
                 continue
+        print(file)
         self._save_result(test_number=self._get_test_number(file_name=file), df_list=df_list)
         os.remove(file_path)
         print(f'File {file} finished and deleted')
